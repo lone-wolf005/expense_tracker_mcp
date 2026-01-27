@@ -1,0 +1,120 @@
+{
+  "categories": [
+    {
+      "id": 1,
+      "name": "Food & Dining",
+      "icon": "🍔",
+      "subcategories": [
+        { "id": 101, "name": "Restaurant" },
+        { "id": 102, "name": "Fast Food" },
+        { "id": 103, "name": "Cafe" },
+        { "id": 104, "name": "Groceries" },
+        { "id": 105, "name": "Food Delivery" }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Transportation",
+      "icon": "🚗",
+      "subcategories": [
+        { "id": 201, "name": "Fuel" },
+        { "id": 202, "name": "Public Transport" },
+        { "id": 203, "name": "Taxi / Uber" },
+        { "id": 204, "name": "Vehicle Maintenance" },
+        { "id": 205, "name": "Parking" }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Shopping",
+      "icon": "🛍️",
+      "subcategories": [
+        { "id": 301, "name": "Clothes" },
+        { "id": 302, "name": "Footwear" },
+        { "id": 303, "name": "Electronics" },
+        { "id": 304, "name": "Accessories" },
+        { "id": 305, "name": "Online Shopping" }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Bills & Utilities",
+      "icon": "💡",
+      "subcategories": [
+        { "id": 401, "name": "Electricity" },
+        { "id": 402, "name": "Water" },
+        { "id": 403, "name": "Internet" },
+        { "id": 404, "name": "Mobile Recharge" },
+        { "id": 405, "name": "Gas" }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Entertainment",
+      "icon": "🎬",
+      "subcategories": [
+        { "id": 501, "name": "Movies" },
+        { "id": 502, "name": "Games" },
+        { "id": 503, "name": "Subscriptions" },
+        { "id": 504, "name": "Music" },
+        { "id": 505, "name": "Trips & Outing" }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Health",
+      "icon": "🏥",
+      "subcategories": [
+        { "id": 601, "name": "Doctor" },
+        { "id": 602, "name": "Medicine" },
+        { "id": 603, "name": "Gym" },
+        { "id": 604, "name": "Medical Tests" },
+        { "id": 605, "name": "Insurance" }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Education",
+      "icon": "📚",
+      "subcategories": [
+        { "id": 701, "name": "Courses" },
+        { "id": 702, "name": "Books" },
+        { "id": 703, "name": "Exam Fees" },
+        { "id": 704, "name": "Coaching" }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Personal",
+      "icon": "🧍",
+      "subcategories": [
+        { "id": 801, "name": "Salon" },
+        { "id": 802, "name": "Skincare" },
+        { "id": 803, "name": "Fitness" },
+        { "id": 804, "name": "Self Care" }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Investments",
+      "icon": "📈",
+      "subcategories": [
+        { "id": 901, "name": "Stocks" },
+        { "id": 902, "name": "Mutual Funds" },
+        { "id": 903, "name": "Crypto" },
+        { "id": 904, "name": "Fixed Deposit" },
+        { "id": 905, "name": "Gold" }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Others",
+      "icon": "📦",
+      "subcategories": [
+        { "id": 1001, "name": "Gifts" },
+        { "id": 1002, "name": "Donations" },
+        { "id": 1003, "name": "Unexpected Expense" }
+      ]
+    }
+  ]
+}
