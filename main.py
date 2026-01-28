@@ -1,11 +1,14 @@
 import json
 import os
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
+import secrets
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from bson import ObjectId
 
 # Load environment variables
 load_dotenv()
@@ -18,6 +21,9 @@ CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
 
 # MongoDB connection
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017/expense_tracker")
+
+# Session configuration - Token expires after 24 hours by default
+SESSION_TIMEOUT_HOURS = int(os.getenv("SESSION_TIMEOUT_HOURS", "24"))
 
 
 def get_db_connection():
@@ -37,6 +43,16 @@ def get_db_connection():
         raise PyMongoError(f"Failed to connect to MongoDB: {e}")
 
 
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def generate_session_token() -> str:
+    """Generate a secure random session token."""
+    return secrets.token_urlsafe(32)
+
+
 def init_database() -> None:
     """
     Initialize the MongoDB database with required collections and indexes.
@@ -44,15 +60,28 @@ def init_database() -> None:
     try:
         db = get_db_connection()
         
+        # Create users collection if it doesn't exist
+        if "users" not in db.list_collection_names():
+            db.create_collection("users")
+        
         # Create expenses collection if it doesn't exist
         if "expenses" not in db.list_collection_names():
             db.create_collection("expenses")
         
-        # Create indexes for better query performance
+        # Create indexes for users collection
+        users_collection = db["users"]
+        users_collection.create_index("username", unique=True)
+        users_collection.create_index("email", unique=True)
+        users_collection.create_index("session_token")
+        users_collection.create_index("session_expires_at")
+        
+        # Create indexes for expenses collection
         expenses_collection = db["expenses"]
+        expenses_collection.create_index("user_id")
         expenses_collection.create_index("date")
         expenses_collection.create_index("category")
         expenses_collection.create_index("description")
+        expenses_collection.create_index([("user_id", 1), ("date", -1)])
         
         print(f"✓ MongoDB database initialized successfully")
         
@@ -64,9 +93,204 @@ def initialize_expense_database() -> str:
     """Initialize the expense tracker database with required collections."""
     try:
         init_database()
-        return "Database initialized successfully with expenses collection"
+        return "Database initialized successfully with users and expenses collections"
     except Exception as e:
         return f"Error initializing database: {str(e)}"
+
+
+@mcp.tool
+def register_user(username: str, email: str, password: str) -> str:
+    """
+    Register a new user in the system.
+    
+    Args:
+        username: Unique username for the user
+        email: User's email address (must be unique)
+        password: User's password (will be hashed)
+    
+    Returns:
+        Success message with user_id or error message
+    """
+    try:
+        db = get_db_connection()
+        users_collection = db["users"]
+        
+        # Check if username or email already exists
+        if users_collection.find_one({"username": username}):
+            return f"❌ Username '{username}' already exists"
+        
+        if users_collection.find_one({"email": email}):
+            return f"❌ Email '{email}' already registered"
+        
+        # Create user document
+        user_doc = {
+            "username": username,
+            "email": email,
+            "password_hash": hash_password(password),
+            "created_at": datetime.now(),
+            "session_token": None,
+            "session_expires_at": None
+        }
+        
+        result = users_collection.insert_one(user_doc)
+        return f"✓ User registered successfully! User ID: {result.inserted_id}"
+    except PyMongoError as e:
+        return f"❌ Error registering user: {str(e)}"
+
+
+@mcp.tool
+def login_user(username: str, password: str) -> str:
+    """
+    Login a user and generate a session token.
+    
+    Args:
+        username: Username or email
+        password: User's password
+    
+    Returns:
+        Success message with session token or error message
+    """
+    try:
+        db = get_db_connection()
+        users_collection = db["users"]
+        
+        # Find user by username or email
+        user = users_collection.find_one({
+            "$or": [
+                {"username": username},
+                {"email": username}
+            ]
+        })
+        
+        if not user:
+            return "❌ Invalid username or password"
+        
+        # Verify password
+        if user["password_hash"] != hash_password(password):
+            return "❌ Invalid username or password"
+        
+        # Generate session token and expiration time
+        session_token = generate_session_token()
+        expires_at = datetime.now() + timedelta(hours=SESSION_TIMEOUT_HOURS)
+        
+        # Update user with session token and expiration
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {
+                "session_token": session_token,
+                "session_expires_at": expires_at,
+                "last_login": datetime.now()
+            }}
+        )
+        
+        return f"✓ Login successful!\nUser ID: {user['_id']}\nSession Token: {session_token}\nExpires: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n⚠️ Save this session token - you'll need it for all expense operations!\n💡 Session valid for {SESSION_TIMEOUT_HOURS} hours"
+    except PyMongoError as e:
+        return f"❌ Error during login: {str(e)}"
+
+
+@mcp.tool
+def check_session_status(session_token: str) -> str:
+    """
+    Check the status and expiration time of a session token.
+    
+    Args:
+        session_token: User's session token
+    
+    Returns:
+        Session status information
+    """
+    try:
+        db = get_db_connection()
+        users_collection = db["users"]
+        
+        user = users_collection.find_one({"session_token": session_token})
+        
+        if not user:
+            return "❌ Invalid session token"
+        
+        if not user.get("session_expires_at"):
+            return "⚠️ Session found but no expiration set (legacy session)"
+        
+        expires_at = user["session_expires_at"]
+        now = datetime.now()
+        
+        if now > expires_at:
+            return f"❌ Session expired at {expires_at.strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        time_remaining = expires_at - now
+        hours_remaining = time_remaining.total_seconds() / 3600
+        
+        result = f"✓ Session is valid\n"
+        result += f"User: {user['username']}\n"
+        result += f"Expires at: {expires_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        result += f"Time remaining: {hours_remaining:.1f} hours"
+        
+        return result
+    except PyMongoError as e:
+        return f"❌ Error checking session: {str(e)}"
+
+
+@mcp.tool
+def logout_user(session_token: str) -> str:
+    """
+    Logout a user by invalidating their session token.
+    
+    Args:
+        session_token: User's current session token
+    
+    Returns:
+        Success or error message
+    """
+    try:
+        db = get_db_connection()
+        users_collection = db["users"]
+        
+        result = users_collection.update_one(
+            {"session_token": session_token},
+            {"$set": {"session_token": None, "session_expires_at": None}}
+        )
+        
+        if result.modified_count > 0:
+            return "✓ Logged out successfully"
+        else:
+            return "❌ Invalid session token"
+    except PyMongoError as e:
+        return f"❌ Error during logout: {str(e)}"
+
+
+def get_user_from_token(session_token: str):
+    """
+    Get user document from session token and validate expiration.
+    
+    Args:
+        session_token: User's session token
+    
+    Returns:
+        User document or None (if token invalid or expired)
+    """
+    try:
+        db = get_db_connection()
+        users_collection = db["users"]
+        
+        # Find user with this token
+        user = users_collection.find_one({"session_token": session_token})
+        
+        if not user:
+            return None
+        
+        # Check if session has expired
+        if user.get("session_expires_at"):
+            if datetime.now() > user["session_expires_at"]:
+                # Session expired - clear the token
+                users_collection.update_one(
+                    {"_id": user["_id"]},
+                    {"$set": {"session_token": None, "session_expires_at": None}}
+                )
+                return None
+        
+        return user
+    except PyMongoError:
+        return None
 
 
 @mcp.resource("categories://list")
@@ -132,13 +356,30 @@ def list_available_categories() -> str:
 
 
 @mcp.tool
-def add_expense(description: str, amount: float, category: str) -> str:
-    """Add an expense to the expense tracker database."""
+def add_expense(session_token: str, description: str, amount: float, category: str) -> str:
+    """
+    Add an expense to the expense tracker database for the logged-in user.
+    
+    Args:
+        session_token: User's session token (obtained from login)
+        description: Description of the expense
+        amount: Amount spent
+        category: Category of the expense
+    
+    Returns:
+        Success message or error
+    """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
         expense_doc = {
+            "user_id": user["_id"],
             "description": description,
             "amount": amount,
             "category": category,
@@ -153,16 +394,29 @@ def add_expense(description: str, amount: float, category: str) -> str:
 
 
 @mcp.tool
-def list_all_expense() -> str:
-    """List all expenses from the expense tracker database with their IDs."""
+def list_all_expense(session_token: str) -> str:
+    """
+    List all expenses for the logged-in user.
+    
+    Args:
+        session_token: User's session token
+    
+    Returns:
+        List of user's expenses
+    """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
-        expenses = list(expenses_collection.find().sort("_id", 1))
+        expenses = list(expenses_collection.find({"user_id": user["_id"]}).sort("_id", 1))
         
         if expenses:
-            result = "📋 All Expenses:\n" + "="*60 + "\n"
+            result = f"📋 Your Expenses (User: {user['username']}):\n" + "="*60 + "\n"
             for expense in expenses:
                 result += f"ID: {expense['_id']}\n"
                 result += f"  Description: {expense['description']}\n"
@@ -172,29 +426,35 @@ def list_all_expense() -> str:
                 result += "-"*60 + "\n"
             return result
         else:
-            return "No expenses found"
+            return "No expenses found for your account"
     except PyMongoError as e:
         return f"❌ Error listing expenses: {str(e)}"
 
 
 @mcp.tool
-def search_expense(search_term: str) -> str:
+def search_expense(session_token: str, search_term: str) -> str:
     """
-    Search for expenses by description, category, or amount.
-    Returns matching expenses with their IDs.
+    Search for expenses by description or category for the logged-in user.
     
     Args:
+        session_token: User's session token
         search_term: Text to search for in description or category
     
     Returns:
-        Formatted list of matching expenses with IDs
+        Formatted list of matching expenses
     """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
-        # Search in description and category using regex
+        # Search in description and category using regex, filtered by user_id
         query = {
+            "user_id": user["_id"],
             "$or": [
                 {"description": {"$regex": search_term, "$options": "i"}},
                 {"category": {"$regex": search_term, "$options": "i"}}
@@ -204,7 +464,7 @@ def search_expense(search_term: str) -> str:
         expenses = list(expenses_collection.find(query).sort("_id", 1))
         
         if expenses:
-            result = f"🔍 Search results for '{search_term}':\n" + "="*60 + "\n"
+            result = f"🔍 Search results for '{search_term}' (User: {user['username']}):\n" + "="*60 + "\n"
             for expense in expenses:
                 result += f"ID: {expense['_id']}\n"
                 result += f"  Description: {expense['description']}\n"
@@ -220,11 +480,12 @@ def search_expense(search_term: str) -> str:
 
 
 @mcp.tool
-def get_expense_details_by_date_and_category(start_date: str, end_date: str, category: Optional[str] = None) -> str:
+def get_expense_details_by_date_and_category(session_token: str, start_date: str, end_date: str, category: Optional[str] = None) -> str:
     """
-    Get detailed list of expenses between two dates, optionally filtered by category.
+    Get detailed list of expenses between two dates for the logged-in user, optionally filtered by category.
 
     Args:
+        session_token: User's session token
         start_date: The start date of the range (format: YYYY-MM-DD)
         end_date: The end date of the range (format: YYYY-MM-DD)
         category: The category to filter by (optional)
@@ -233,11 +494,17 @@ def get_expense_details_by_date_and_category(start_date: str, end_date: str, cat
         Detailed list of expenses with all information
     """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
         # Build query based on whether category is provided
         query: dict = {
+            "user_id": user["_id"],
             "date": {"$gte": start_date, "$lte": end_date}
         }
         
@@ -271,32 +538,31 @@ def get_expense_details_by_date_and_category(start_date: str, end_date: str, cat
 
 
 @mcp.tool
-def get_expense_summary_by_date_and_category(start_date: str, end_date: str, category: Optional[str] = None) -> str:
+def get_expense_summary_by_date_and_category(session_token: str, start_date: str, end_date: str, category: Optional[str] = None) -> str:
     """
-    Get grouped summary of expenses between two dates, optionally filtered and grouped by category.
-    
-    If category is provided:
-    - Filters expenses by that specific category
-    - Groups results by category (showing only that category)
-    
-    If category is not provided:
-    - Shows all expenses in the date range
-    - Groups results by all categories found
+    Get grouped summary of expenses between two dates for the logged-in user, optionally filtered and grouped by category.
     
     Args:
+        session_token: User's session token
         start_date: The start date of the range (format: YYYY-MM-DD)
         end_date: The end date of the range (format: YYYY-MM-DD)
-        category: The category to filter by (optional). If provided, only shows expenses from this category.
+        category: The category to filter by (optional)
     
     Returns:
         Formatted summary with expenses grouped by category, showing totals
     """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
         # Build query based on whether category is provided
         query: dict = {
+            "user_id": user["_id"],
             "date": {"$gte": start_date, "$lte": end_date}
         }
         
@@ -358,22 +624,27 @@ def get_expense_summary_by_date_and_category(start_date: str, end_date: str, cat
 
 
 @mcp.tool
-def get_expense_details(expense_id: str) -> str:
+def get_expense_details(session_token: str, expense_id: str) -> str:
     """
-    Get detailed information about a specific expense by ID.
+    Get detailed information about a specific expense by ID for the logged-in user.
     
     Args:
+        session_token: User's session token
         expense_id: The MongoDB ObjectId of the expense to retrieve (as string)
     
     Returns:
         Detailed expense information
     """
     try:
-        from bson import ObjectId
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
-        expense = expenses_collection.find_one({"_id": ObjectId(expense_id)})
+        expense = expenses_collection.find_one({"_id": ObjectId(expense_id), "user_id": user["_id"]})
         
         if expense:
             result = f"📄 Expense Details (ID: {expense['_id']}):\n" + "="*60 + "\n"
@@ -384,19 +655,33 @@ def get_expense_details(expense_id: str) -> str:
             result += f"Created: {expense['created_at']}\n"
             return result
         else:
-            return f"❌ Expense with ID {expense_id} not found"
+            return f"❌ Expense with ID {expense_id} not found or doesn't belong to you"
     except Exception as e:
         return f"❌ Error getting expense: {str(e)}"
 
 
 @mcp.tool
-def delete_expense(description: str) -> str:
-    """Delete an expense from the expense tracker database by description."""
+def delete_expense(session_token: str, description: str) -> str:
+    """
+    Delete expenses from the expense tracker database by description for the logged-in user.
+    
+    Args:
+        session_token: User's session token
+        description: Description of the expense(s) to delete
+    
+    Returns:
+        Success or error message
+    """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
-        result = expenses_collection.delete_many({"description": description})
+        result = expenses_collection.delete_many({"user_id": user["_id"], "description": description})
         
         if result.deleted_count > 0:
             return f"✓ Deleted {result.deleted_count} expense(s) successfully"
@@ -407,14 +692,29 @@ def delete_expense(description: str) -> str:
 
 
 @mcp.tool
-def modify_expense(description: str, amount: float) -> str:
-    """Modify an expense amount in the expense tracker database."""
+def modify_expense(session_token: str, description: str, amount: float) -> str:
+    """
+    Modify an expense amount in the expense tracker database for the logged-in user.
+    
+    Args:
+        session_token: User's session token
+        description: Description of the expense(s) to modify
+        amount: New amount for the expense(s)
+    
+    Returns:
+        Success or error message
+    """
     try:
+        # Verify user session
+        user = get_user_from_token(session_token)
+        if not user:
+            return "❌ Invalid session token. Please login first."
+        
         db = get_db_connection()
         expenses_collection = db["expenses"]
         
         result = expenses_collection.update_many(
-            {"description": description},
+            {"user_id": user["_id"], "description": description},
             {"$set": {"amount": amount}}
         )
         
